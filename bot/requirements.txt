@@ -1,0 +1,5 @@
+python-telegram-bot==21.6
+openai==1.54.4
+# httpx 0.28 removed the `proxies` arg that openai 1.54.x still passes; pin to the
+# last compatible release to avoid `TypeError: ... unexpected keyword 'proxies'`.
+httpx==0.27.2

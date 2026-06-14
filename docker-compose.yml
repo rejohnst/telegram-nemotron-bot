@@ -1,0 +1,84 @@
+services:
+  # ---------------------------------------------------------------------------
+  # NVIDIA NIM — serves Llama Nemotron Super 49B with TensorRT-LLM (FP4 on GB10).
+  # Exposes an OpenAI-compatible API on :8000. Stays on the internal network;
+  # only the bot talks to it.
+  # ---------------------------------------------------------------------------
+  nim:
+    image: ${NIM_IMAGE:-nvcr.io/nim/nvidia/llama-3.3-nemotron-super-49b-v1.5:latest}
+    container_name: nemotron-nim
+    restart: always
+    environment:
+      - NGC_API_KEY=${NGC_API_KEY}
+    # NIM caches downloaded/optimized engines here so restarts are fast.
+    volumes:
+      - nim-cache:/opt/nim/.cache
+    shm_size: 16gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Only exposed to the internal compose network (no host port published).
+    expose:
+      - "8000"
+    healthcheck:
+      # NIM reports ready once the model is loaded and engines are built.
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/v1/health/ready"]
+      interval: 20s
+      timeout: 5s
+      retries: 60        # first boot builds engines — can take several minutes
+      start_period: 600s
+
+  # ---------------------------------------------------------------------------
+  # Telegram <-> NIM bridge. Dials OUT to Telegram (long-polling) and to NIM on
+  # the internal network. No inbound ports needed anywhere.
+  # ---------------------------------------------------------------------------
+  bot:
+    build: ./bot
+    container_name: nemotron-telegram-bot
+    restart: always
+    depends_on:
+      nim:
+        condition: service_healthy
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - OPENAI_BASE_URL=http://nim:8000/v1
+      - OPENAI_API_KEY=not-needed-for-local-nim
+      - MODEL_NAME=${MODEL_NAME:-nvidia/llama-3.3-nemotron-super-49b-v1.5}
+      - SYSTEM_PROMPT=${SYSTEM_PROMPT:-You are a helpful, concise assistant.}
+      - MAX_HISTORY_TURNS=${MAX_HISTORY_TURNS:-12}
+      - ALLOWED_USER_IDS=${ALLOWED_USER_IDS:-}
+      - DB_PATH=/data/conversations.db
+    volumes:
+      - bot-data:/data
+
+  # ---------------------------------------------------------------------------
+  # Open WebUI — local ChatGPT-style UI for the same NIM model. Streams tokens
+  # live and shows per-response generation stats (tokens/sec, token counts).
+  # Reaches NIM over the internal network; published on the host at :3000.
+  # ---------------------------------------------------------------------------
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: always
+    depends_on:
+      nim:
+        condition: service_healthy
+    ports:
+      - "3000:8080"          # browse at http://<spark-ip>:3000
+    environment:
+      # Point Open WebUI at the local NIM's OpenAI-compatible endpoint.
+      - OPENAI_API_BASE_URL=http://nim:8000/v1
+      - OPENAI_API_KEY=not-needed-for-local-nim
+      # Single-user local box: skip login. Set to True if you want accounts.
+      - WEBUI_AUTH=False
+    volumes:
+      - openwebui-data:/app/backend/data
+
+volumes:
+  nim-cache:
+  bot-data:
+  openwebui-data:
