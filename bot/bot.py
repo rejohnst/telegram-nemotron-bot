@@ -1,5 +1,5 @@
 """
-Telegram <-> NVIDIA NIM bridge for Llama Nemotron Super 49B.
+Telegram <-> NVIDIA NIM bridge (default: Nemotron 3 Super 120B-A12B).
 
 - Talks to Telegram via long-polling (outbound only; no inbound ports).
 - Talks to NIM via its OpenAI-compatible API.
@@ -30,11 +30,28 @@ from telegram.ext import (
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "http://nim:8000/v1")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "not-needed")
-MODEL_NAME = os.environ.get("MODEL_NAME", "nvidia/llama-3.3-nemotron-super-49b-v1.5")
+MODEL_NAME = os.environ.get("MODEL_NAME", "nvidia/nemotron-3-nano")
 SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", "You are a helpful, concise assistant.")
 MAX_HISTORY_TURNS = int(os.environ.get("MAX_HISTORY_TURNS", "12"))
 DB_PATH = os.environ.get("DB_PATH", "/data/conversations.db")
 TELEGRAM_MAX_LEN = 4096
+
+# Sampling. Nemotron 3 recommends temp=1.0/top_p=0.95; the 49B preferred ~0.6.
+TEMPERATURE = float(os.environ.get("TEMPERATURE", "1.0"))
+TOP_P = float(os.environ.get("TOP_P", "0.95"))
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "2048"))
+
+# How this model controls/returns reasoning. Different families differ:
+#   "nemotron3" — Nemotron 3 (e.g. 120b-a12b): toggle via chat_template_kwargs;
+#                 reasoning comes back in a separate `reasoning_content` field, so
+#                 the visible content is already clean.
+#   "directive" — Llama-Nemotron Super 49B: toggle via a "detailed thinking on/off"
+#                 system phrase; reasoning is wrapped in <think>…</think> in content.
+#   "none"      — model has no reasoning control; /think becomes a no-op.
+REASONING_STYLE = os.environ.get("REASONING_STYLE", "nemotron3").lower()
+# Optional cap on reasoning length for nemotron3 (256–16384). Empty = model default.
+_budget = os.environ.get("REASONING_BUDGET", "").strip()
+REASONING_BUDGET = int(_budget) if _budget else None
 
 # Optional allowlist: comma-separated numeric Telegram user IDs. Empty = open.
 _allowed = os.environ.get("ALLOWED_USER_IDS", "").strip()
@@ -47,9 +64,27 @@ log = logging.getLogger("nemotron-bot")
 
 client = AsyncOpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
 
-# Nemotron toggles reasoning via a system directive.
+# 49B-style reasoning directive (used only when REASONING_STYLE == "directive").
 THINK_DIRECTIVE = {True: "detailed thinking on", False: "detailed thinking off"}
+# Safety net: strip any <think>…</think> that leaks into visible content. Harmless
+# when none is present (nemotron3 returns reasoning in a separate field).
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def build_request_kwargs(reasoning: bool, system: str):
+    """Return (messages-system-content, extra_body) for the active REASONING_STYLE."""
+    extra_body = {}
+    if REASONING_STYLE == "directive":
+        # 49B: prepend the on/off phrase to the system prompt.
+        system = f"{THINK_DIRECTIVE[reasoning]}\n\n{system}"
+    elif REASONING_STYLE == "nemotron3":
+        # Nemotron 3: toggle thinking through the chat template.
+        kwargs = {"enable_thinking": reasoning}
+        extra_body["chat_template_kwargs"] = kwargs
+        if reasoning and REASONING_BUDGET:
+            extra_body["reasoning_budget"] = REASONING_BUDGET
+    # "none": leave system unchanged and send no extra_body.
+    return system, extra_body
 
 
 # --------------------------------------------------------------------------- #
@@ -138,7 +173,7 @@ def _authorized(update: Update) -> bool:
 # --------------------------------------------------------------------------- #
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Hi! I'm a local Nemotron Super 49B running on your DGX Spark.\n\n"
+        "👋 Hi! I'm a local LLM running on your DGX Spark.\n\n"
         "Just send a message to chat.\n\n"
         "Commands:\n"
         "/reset — clear this conversation's memory\n"
@@ -186,9 +221,10 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     reasoning = await asyncio.to_thread(_get_reasoning, chat_id)
 
-    # Build the request: system directive + persisted history + new turn.
+    # Build the request: system prompt + persisted history + new turn. Reasoning
+    # control varies by model family (see build_request_kwargs).
     history = await asyncio.to_thread(_load_history, chat_id)
-    system = f"{THINK_DIRECTIVE[reasoning]}\n\n{SYSTEM_PROMPT}"
+    system, extra_body = build_request_kwargs(reasoning, SYSTEM_PROMPT)
     messages = [{"role": "system", "content": system}]
     messages += history
     messages.append({"role": "user", "content": user_text})
@@ -207,8 +243,10 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         resp = await client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
-            temperature=0.6,
-            max_tokens=2048,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
+            max_tokens=MAX_TOKENS,
+            extra_body=extra_body or None,
         )
         raw = resp.choices[0].message.content or ""
     except Exception as e:  # noqa: BLE001 — surface any backend error to the user

@@ -1,0 +1,18 @@
+# SearXNG config for Open WebUI web-search RAG.
+# `use_default_settings: true` merges these overrides with SearXNG's built-in
+# defaults, so we only specify what differs.
+use_default_settings: true
+
+server:
+  # CHANGE THIS to a random value: `openssl rand -hex 32`
+  secret_key: "CHANGE_ME_run_openssl_rand_hex_32"
+  # Disable the bot-detection rate limiter — Open WebUI's internal calls would
+  # otherwise get throttled / 403'd.
+  limiter: false
+
+search:
+  # Open WebUI queries SearXNG's JSON API; without `json` here you get
+  # "403 Forbidden" on every search.
+  formats:
+    - html
+    - json

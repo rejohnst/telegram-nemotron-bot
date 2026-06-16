@@ -4,3 +4,7 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+
+# SearXNG: keep our settings.yml, ignore files it generates at runtime
+searxng/*
+!searxng/settings.yml

@@ -1,15 +1,44 @@
 services:
   # ---------------------------------------------------------------------------
-  # NVIDIA NIM — serves Llama Nemotron Super 49B with TensorRT-LLM (FP4 on GB10).
-  # Exposes an OpenAI-compatible API on :8000. Stays on the internal network;
-  # only the bot talks to it.
+  # NVIDIA NIM — serves Nemotron 3 Super 120B-A12B (MoE) with TensorRT-LLM (NVFP4
+  # on GB10). Exposes an OpenAI-compatible API on :8000. Stays on the internal
+  # network; the bot and Open WebUI talk to it.
   # ---------------------------------------------------------------------------
   nim:
-    image: ${NIM_IMAGE:-nvcr.io/nim/nvidia/llama-3.3-nemotron-super-49b-v1.5:latest}
+    # Nemotron 3 Nano 30B-A3B (MoE, ~3.5B active) — sized for the Spark.
+    # VERIFY THE TAG: on the Spark, list tags and pick the GB10 build (look for a
+    # "-variant" tag like the 120B had); confirm with `list-model-profiles`. Set the
+    # working value in .env as NIM_IMAGE. See INSTALL.md §10 / models.md.
+    image: ${NIM_IMAGE:-nvcr.io/nim/nvidia/nemotron-3-nano:latest}
     container_name: nemotron-nim
     restart: always
     environment:
       - NGC_API_KEY=${NGC_API_KEY}
+      # Pinned to the Nano's nvfp4-tp1-pp1 profile (~21 GB, most efficient on GB10).
+      # The fp8 profile (~34 GB) also fits; both are fine on 128 GB. Re-verify the id
+      # after a tag bump with: docker compose run --rm nim list-model-profiles
+      - NIM_MODEL_PROFILE=${NIM_MODEL_PROFILE:-1fba9ecfcfb4cde28d4ce3fd55c40bca89a5a613e25e98f057befe6a7e99eada}
+      # Context window cap (KV-cache memory). Model supports up to 1M, but on the
+      # Spark a too-large value can prevent startup (KV cache won't fit) and starves
+      # concurrency. 128K is a comfortable chatbot default; see INSTALL.md §10.
+      - NIM_MAX_MODEL_LEN=${NIM_MAX_MODEL_LEN:-131072}
+      # KV-cache pool as a fraction of GPU memory. CRITICAL on GB10/Spark: "GPU
+      # memory" IS system RAM (unified), so the usual ~0.9 default makes NIM reserve
+      # ~115GB for KV ON TOP OF ~60GB weights → overcommit → swap thrash. Keep this
+      # low so the OS + other containers fit. See INSTALL.md §10.
+      - NIM_KVCACHE_PERCENT=${NIM_KVCACHE_PERCENT:-0.4}
+      # Force eager mode on GB10/sm_121: vLLM's torch.compile/Inductor warmup crashes
+      # ("InductorError") because the build's CUDA arch list doesn't cover sm_121.
+      # NIM_DISABLE_CUDA_GRAPH maps to vLLM's --enforce-eager (skips compilation +
+      # CUDA graphs — a bit slower, but lets the engine start). See INSTALL.md §10.
+      # NOTE: the var is NIM_DISABLE_CUDA_GRAPH, NOT NIM_ENFORCE_EAGER (which is ignored).
+      - NIM_DISABLE_CUDA_GRAPH=${NIM_DISABLE_CUDA_GRAPH:-1}
+      # Enable tool/function calling. This Nano NIM does NOT auto-configure it (the
+      # 120B did), so agentic mode fails with: '"auto" tool choice requires
+      # --enable-auto-tool-choice and --tool-call-parser to be set'. Pass them via
+      # NIM_PASSTHROUGH_ARGS (the escape hatch for any vLLM arg without a NIM var).
+      # Nemotron 3 Nano's tool-call parser is "qwen3_coder".
+      - NIM_PASSTHROUGH_ARGS=${NIM_PASSTHROUGH_ARGS:---enable-auto-tool-choice --tool-call-parser qwen3_coder}
     # NIM caches downloaded/optimized engines here so restarts are fast.
     volumes:
       - nim-cache:/opt/nim/.cache
@@ -47,10 +76,15 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - OPENAI_BASE_URL=http://nim:8000/v1
       - OPENAI_API_KEY=not-needed-for-local-nim
-      - MODEL_NAME=${MODEL_NAME:-nvidia/llama-3.3-nemotron-super-49b-v1.5}
+      - MODEL_NAME=${MODEL_NAME:-nvidia/nemotron-3-nano}
       - SYSTEM_PROMPT=${SYSTEM_PROMPT:-You are a helpful, concise assistant.}
       - MAX_HISTORY_TURNS=${MAX_HISTORY_TURNS:-12}
       - ALLOWED_USER_IDS=${ALLOWED_USER_IDS:-}
+      # Reasoning convention: "nemotron3" (chat_template_kwargs) | "directive"
+      # (49B "detailed thinking on/off") | "none".
+      - REASONING_STYLE=${REASONING_STYLE:-nemotron3}
+      - TEMPERATURE=${TEMPERATURE:-1.0}
+      - TOP_P=${TOP_P:-0.95}
       - DB_PATH=/data/conversations.db
     volumes:
       - bot-data:/data
@@ -75,8 +109,30 @@ services:
       - OPENAI_API_KEY=not-needed-for-local-nim
       # Single-user local box: skip login. Set to True if you want accounts.
       - WEBUI_AUTH=False
+      # Web-search RAG via the local SearXNG below (toggle per-chat in the UI).
+      - ENABLE_WEB_SEARCH=True
+      - WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>
+      - WEB_SEARCH_RESULT_COUNT=3
+      - WEB_SEARCH_CONCURRENT_REQUESTS=10
     volumes:
       - openwebui-data:/app/backend/data
+
+  # ---------------------------------------------------------------------------
+  # SearXNG — self-hosted metasearch engine used by Open WebUI for web-search
+  # RAG. Fully local, no API key. Internal-only (Open WebUI reaches it by name).
+  # Config lives in ./searxng/settings.yml (must enable the JSON format).
+  # ---------------------------------------------------------------------------
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: always
+    environment:
+      - SEARXNG_BASE_URL=http://searxng:8080/
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    expose:
+      - "8080"
 
 volumes:
   nim-cache:
