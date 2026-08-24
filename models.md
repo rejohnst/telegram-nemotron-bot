@@ -1,14 +1,14 @@
 # NIM model selection on DGX Spark
 
 Research checked against NVIDIA's NGC catalog and NIM support matrices on
-**2026-08-23**. Treat compatibility as a property of the complete
+**2026-08-24**. Treat compatibility as a property of the complete
 **image tag + model profile + GPU** combination, not just the model name.
 
 ## Recommended single-Spark choices
 
 | Model | Why choose it | Verified Spark status | Caveats |
 |---|---|---|---|
-| Nemotron 3 Nano 30B-A3B | Current balanced default; fast MoE, reasoning and tools | Current NIM support matrix lists GB10 with BF16, FP8 and NVFP4 profiles | Model-specific reasoning controls |
+| Nemotron 3 Nano 30B-A3B | Current balanced default; fast MoE, reasoning and tools | NIM 2.0.8 reported runnable TP1 BF16, FP8, and NVFP4 profiles on the target GB10; the preset pins the 21 GB NVFP4 profile | Profile hash is tied to the pinned image tag |
 | Nemotron 3.5 Lightning 30B-A3B | Best candidate for the next default; 3B active parameters, reasoning, agents, coding, 1M model context | Current matrix verifies GB10 and lists a 30 GB TP1 NVFP4 floor | Early-access container as of this review; benchmark before promoting |
 | GPT-OSS 20B | Strong compact reasoning and tool-use option | Current matrix explicitly verifies GB10 with TP1 MXFP4 | `/think` needs a `reasoning_effort` adapter |
 | Qwen3 32B for DGX Spark | Multilingual, reasoning and agent use; dedicated NVFP4 build | Spark-only NIM profile, one GB10, about 41.6 GB disk footprint | Legacy 1.x variant; `/think` needs Qwen controls |
@@ -73,10 +73,11 @@ one yet: picking a default third-party model and trust policy is a separate deci
 ## Operational rules
 
 - Pin exact image tags in presets; do not make `latest` part of a reproducible setup.
-- Run `list-model-profiles` after every tag change. Profile hashes are not stable API.
-- Keep engine flags and reasoning/tool parsers in presets. For example, NVIDIA's
-  Nemotron 3.5 guide requires `--reasoning-parser nemotron_v3`, while the Qwen3 Spark
-  variant does not support the eager-mode environment variable.
+- Run `list-model-profiles` after every tag change. Profile hashes are not stable API;
+  the Nano preset's pinned hash was verified only with NIM 2.0.8 on the target Spark.
+- Keep engine flags and reasoning/tool parsers in presets. The Nemotron presets use
+  `nemotron_v3` reasoning plus `qwen3_coder` automatic tool calling, while the Qwen3
+  Spark variant does not support the eager-mode environment variable.
 - Start NIM alone after a model change and watch system RAM/swap before adding UI
   services.
 - Keep `NIM_KVCACHE_PERCENT` conservative on unified memory and lower
