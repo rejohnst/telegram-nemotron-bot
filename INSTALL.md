@@ -1,7 +1,7 @@
 # Install & Deploy Guide
 
-Step-by-step deployment of the always-on Telegram → Nemotron 3 Nano 30B-A3B bot
-on a DGX Spark. For model swaps after install, see [`models.md`](./models.md).
+Step-by-step deployment of the always-on Telegram → NVIDIA NIM bot on a DGX Spark.
+Nemotron 3 Nano is the default; see [`models.md`](./models.md) for verified alternatives.
 
 ---
 
@@ -50,8 +50,8 @@ ALLOWED_USER_IDS=<your numeric Telegram ID>   # strongly recommended
 > If `ALLOWED_USER_IDS` is left empty, **anyone who finds the bot can use your GPU.**
 > Set it to lock the bot to yourself (comma-separate multiple IDs).
 
-Optional tunables (sane defaults already applied): `SYSTEM_PROMPT`,
-`MAX_HISTORY_TURNS`, `NIM_IMAGE`, `MODEL_NAME`.
+Optional tunables include `SYSTEM_PROMPT`, `MAX_HISTORY_TURNS`, `MAX_TOKENS`, and
+`REASONING_BUDGET`. Prefer a file under `model-presets/` for model-specific values.
 
 ---
 
@@ -70,12 +70,12 @@ echo "$NGC_API_KEY" | docker login nvcr.io --username '$oauthtoken' --password-s
 ## 4. Launch
 
 ```bash
-docker compose up -d
+./compose-model model-presets/nemotron-3-nano.env up -d
 ```
 
 This starts two services:
-- **nim** — serves Nemotron 3 Nano 30B-A3B (downloads the ~21 GB nvfp4 weights on
-  first boot; takes a few minutes).
+- **nim** — serves the selected NIM model and downloads/builds its profile on first
+  boot.
 - **bot** — waits for NIM to report healthy, then connects to Telegram.
 
 Watch progress:
@@ -97,57 +97,50 @@ When both are up, message your bot on Telegram. 🎉
   - `/reset` — clear this conversation's memory
   - `/think` — toggle Nemotron's reasoning mode (off by default)
 
-If replies fail with a model-not-found error, confirm the served model id and copy
-it into `MODEL_NAME` in `.env`:
+If replies fail with a model-not-found error, confirm the served model ID and update
+`MODEL_NAME` in the selected model preset:
 
 ```bash
 docker compose exec nim curl -s localhost:8000/v1/models
-docker compose up -d bot     # re-apply .env
+./compose-model model-presets/nemotron-3-nano.env up -d bot
 ```
 
 ---
 
 ## 6. Switching models
 
-The bot speaks the OpenAI API, so changing models **never touches `bot.py`** — you
-edit `.env` (and, for a non-NIM backend, the compose service). Each NIM model is
-cached in the `nim-cache` volume, so once built you can flip between them quickly.
-See [`models.md`](./models.md) for ready-to-paste blocks and rough Spark speeds.
+The bot speaks an OpenAI-compatible API. Keep credentials and personal settings in
+`.env`, then layer a model preset after it. Each NIM model is cached in the
+`nim-cache` volume. See [`models.md`](./models.md) for the researched compatibility
+list and the rules for validating a profile.
 
-### Swap to another NIM model (easiest — two lines)
+### Swap to another NIM model
 
-Edit `.env`:
-```dotenv
-NIM_IMAGE=nvcr.io/nim/openai/gpt-oss-120b:latest
-MODEL_NAME=openai/gpt-oss-120b
-```
-Then rebuild/restart just the NIM service:
 ```bash
-docker compose up -d nim                                   # pulls + builds engines
+./compose-model model-presets/gpt-oss-20b.env config --images
+./compose-model model-presets/gpt-oss-20b.env up -d nim bot
 docker compose exec nim curl -s localhost:8000/v1/models   # confirm the served id
-docker compose restart bot                                 # re-apply .env
 ```
-First boot of a new model builds TensorRT engines (a few minutes); switching back to
-a previously-built model is fast because it stays in `nim-cache`.
+First boot of a new model downloads assets and prepares its runtime/profile. Returning
+to a cached model is faster because its assets stay in `nim-cache`.
 
 > If `MODEL_NAME` doesn't exactly match the id from `/v1/models`, replies fail with a
-> model-not-found error — copy the `id` from that command into `.env`.
+> model-not-found error — copy the `id` into the selected preset and contribute the
+> correction rather than adding it to personal `.env`.
 
 ### Swap to a non-NIM backend (e.g. Ollama)
 
-For models without a NIM, or to A/B against Ollama, replace the `nim` service in
-`docker-compose.yml` with an `ollama` service and point the bot at it via `.env`:
+For a separately managed OpenAI-compatible backend, point the bot at it via `.env`:
 ```dotenv
 OPENAI_BASE_URL=http://ollama:11434/v1
 MODEL_NAME=gpt-oss:120b
 ```
-The bot is unchanged — it only cares about `OPENAI_BASE_URL` + `MODEL_NAME`. Full
-service block and the one-time `ollama pull` step are in [`models.md`](./models.md).
+The Compose file now passes `OPENAI_BASE_URL` through to the bot. A backend that
+replaces the `nim` service still needs its own Compose service and dependency wiring.
 
-> **Reasoning-mode caveat:** the `/think` toggle uses Nemotron's `detailed thinking
-> on/off` convention. It's harmless on other models but is a **no-op** on families
-> that control reasoning differently (e.g. gpt-oss uses `reasoning_effort`). Normal
-> chat still works out of the box; see the quirks table in `models.md`.
+> **Reasoning-mode caveat:** the current bot supports Nemotron 3 and the older
+> directive convention. Presets use `none` for GPT-OSS and Qwen until model adapters
+> map `/think` to their controls; see [`BOT_ROADMAP.md`](./BOT_ROADMAP.md).
 
 ---
 
@@ -157,10 +150,15 @@ service block and the one-time `ollama pull` step are in [`models.md`](./models.
 docker compose ps                 # status
 docker compose logs -f bot        # follow bot logs
 docker compose restart bot        # restart after editing .env
-docker compose pull && docker compose up -d   # update images
+./compose-model model-presets/nemotron-3-nano.env pull
+./compose-model model-presets/nemotron-3-nano.env up -d
 docker compose down               # stop (keeps history + model cache)
 docker compose down -v            # stop and DELETE history + model cache
 ```
+
+Replace the example preset above with the one currently selected whenever a command
+recreates or pulls `nim` or `bot`. Plain `logs`, `ps`, `restart`, and `down` commands
+do not re-resolve model environment values.
 
 **Always-on:** both services use `restart: always`, so they come back automatically
 after a crash or a Spark reboot (as long as the Docker daemon starts on boot, which
@@ -200,12 +198,12 @@ sed -i "s/CHANGE_ME_run_openssl_rand_hex_32/$(openssl rand -hex 32)/" searxng/se
 
 ### Start them
 ```bash
-docker compose up -d open-webui searxng
+./compose-model model-presets/nemotron-3-nano.env --profile web up -d
 docker compose logs --tail=20 searxng     # should start clean
 ```
 Then browse to **http://localhost:3000** (on the Spark) or **http://<spark-ip>:3000**
 (from your LAN). Open WebUI auto-discovers the Nemotron model from NIM's `/v1/models`;
-pick it from the model dropdown.
+pick the selected model from the model dropdown.
 
 ### Using web search
 Web search is **off by default and toggled per chat** — it is not automatic. In a
@@ -233,12 +231,10 @@ JSON output = working.
 
 ## 10. GB10/Spark tuning (memory, context, eager mode)
 
-The compose file ships with Spark-appropriate defaults; this section explains them.
-Context length is paid for in **KV-cache memory**, which shares the 128 GB unified
-pool with the model weights (the **Nano nvfp4 default is ~21 GB**) and the other
-containers. With the Nano this is comfortable; the knobs below matter most if you
-swap in a much larger model (e.g. the 120B Super at ~60 GB, which is why these caps
-exist — it OOM'd once the UI/search containers were also running).
+The compose file ships with conservative Spark defaults. Context length is paid for
+in **KV-cache memory**, which shares the 128 GB unified pool with weights, the OS,
+and other containers. Exact weight/runtime use varies by image tag and selected
+profile; inspect it rather than relying on parameter-count estimates.
 
 How it works:
 - The KV-cache *pool* size is set by memory utilization, not by the context length.
@@ -258,7 +254,7 @@ NIM_MAX_MODEL_LEN=131072      # 128K — comfortable chatbot default
 # NIM_MAX_MODEL_LEN=262144    # 256K — only if you need long documents
 ```
 ```bash
-docker compose up -d nim      # recreates NIM with the new cap
+./compose-model model-presets/nemotron-3-nano.env up -d nim
 ```
 
 ### Verify what actually loaded
@@ -298,25 +294,26 @@ free -h                     # used + swap should drop (a reboot is fine if wedge
 ```
 
 ### Bring services up in order (matters most for large models)
-With the Nano (~21 GB) there's plenty of headroom, but if you run a larger model it's
+With the default Nano there is ample headroom, but for a larger model it is
 safest to start NIM **alone**, confirm memory plateaus (not climbing into swap), then
 add the rest:
 ```bash
-docker compose up -d nim
+./compose-model model-presets/nemotron-3-nano.env up -d nim
 watch -n 3 'free -h; echo; docker stats --no-stream'   # wait for healthy + stable
-docker compose up -d open-webui searxng bot
+./compose-model model-presets/nemotron-3-nano.env --profile web up -d
 ```
 If a larger model keeps fighting the memory ceiling even at low settings, drop back to
 the **Nano** (the default) — it's right-sized for the Spark and runs clean.
 
-### Eager mode + tool calling (GB10 essentials)
-Two more Spark-specific settings, already wired into the `nim` service:
-- `NIM_DISABLE_CUDA_GRAPH=1` → vLLM `--enforce-eager`. **Required on GB10/sm_121**:
-  the torch.compile/Inductor warmup crashes otherwise (`InductorError`).
-- `NIM_PASSTHROUGH_ARGS=--enable-auto-tool-choice --tool-call-parser qwen3_coder` →
-  enables tool/function calling (agentic mode). Without it, agentic requests fail with
-  `"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser`. The
-  Nano's tool-call parser is `qwen3_coder`.
+### Model-specific engine and parser settings
+
+`NIM_DISABLE_CUDA_GRAPH=1` maps to vLLM eager mode and works around CUDA-graph
+startup failures in affected Nemotron 3 Nano releases on GB10. It is not a universal
+Spark setting: the legacy Qwen3 Spark variant explicitly does not support it.
+
+Eager mode, reasoning/tool parsers, profiles, and passthrough arguments are therefore
+not global defaults. Configure them only in a model preset after checking the exact
+image's NIM documentation.
 
 ---
 
@@ -326,15 +323,15 @@ Two more Spark-specific settings, already wired into the `nim` service:
 |---|---|
 | `docker login` fails | Username must be the literal `$oauthtoken`; key must be a valid NGC key. |
 | `docker login` **succeeds** but `docker pull` is `denied: Access Denied` | Wrong-org key or unaccepted terms — see [below](#access-denied-on-docker-pull). |
-| NIM stuck "not ready" for a long time | First boot builds engines — give it several minutes; watch `docker compose logs -f nim`. |
+| NIM stuck "not ready" for a long time | First boot downloads assets and prepares a runtime/profile—give it several minutes and watch `docker compose logs -f nim`. |
 | `402 PAYMENT_REQUIRED` pulling a model | That model is entitlement-gated on your NGC account — request access or use an Ollama backend (see `models.md`). |
 | Bot replies "model not found" | `MODEL_NAME` doesn't match the served id — check `/v1/models` (step 5). |
 | Bot says "Not authorized" | Your Telegram ID isn't in `ALLOWED_USER_IDS`. |
 | No GPU in container | NVIDIA Container Toolkit not active — re-run the step 1 verification. |
-| NIM crashes with `torch._inductor ... InductorError` / "Engine core initialization failed" | GB10/sm_121 torch.compile failure — set `NIM_DISABLE_CUDA_GRAPH=1` (maps to vLLM `--enforce-eager`; **not** `NIM_ENFORCE_EAGER`, which is ignored). Verify `enforce_eager: True` in the engine-args log line. Not a memory issue. |
-| Agentic mode errors: `"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser` | Tool calling not enabled on the NIM. Set `NIM_PASSTHROUGH_ARGS=--enable-auto-tool-choice --tool-call-parser qwen3_coder` on the `nim` service (Nano's parser is `qwen3_coder`), then restart nim. |
+| NIM crashes with `torch._inductor ... InductorError` / "Engine core initialization failed" | For an affected image, add `NIM_DISABLE_CUDA_GRAPH=1` to its preset and verify `enforce_eager: True`. Do not apply it to variants whose documentation marks it unsupported. |
+| Agentic mode errors: `"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser` | The selected model needs tool configuration. Add the parser documented for that exact image to its preset; do not assume another model's parser. |
 | NIM exits with "max seq len larger than KV cache can hold" | Context too large for memory — lower `NIM_MAX_MODEL_LEN` (see §10), e.g. to 65536. |
-| NIM OOMs while loading | Lower `NIM_KVCACHE_PERCENT` (e.g. 0.6) and/or `NIM_MAX_MODEL_LEN` on the `nim` service; ensure the nvfp4 (not fp8/bf16) profile is forced. |
+| NIM OOMs while loading | Stop optional services, lower `NIM_KVCACHE_PERCENT` and/or `NIM_MAX_MODEL_LEN`, and verify that `list-model-profiles` selected a one-GB10 profile appropriate for the image. |
 | Web search returns `403 Forbidden` | SearXNG JSON format not enabled — confirm `searxng/settings.yml` has the `formats:` block (incl. `json`), then `docker compose restart searxng`. |
 | Web search finds nothing / times out | Check reachability with the SearXNG verify command in §9; ensure you toggled Web Search on in the chat. |
 
@@ -375,8 +372,8 @@ TOKEN=$(curl -s -u "\$oauthtoken:$API_KEY" \
 curl -s -H "Authorization: Bearer $TOKEN" \
   "https://nvcr.io/v2/nim/nvidia/nemotron-3-nano/tags/list"
 ```
-Note also that some NIMs may not publish a `:latest` tag — use an exact version tag
+Do not rely on `:latest`; use an exact version tag
 from the [Tags tab](https://catalog.ngc.nvidia.com/orgs/nim/teams/nvidia/containers/nemotron-3-nano)
-and set it as `NIM_IMAGE` in `.env`. **Tip from the 120B Super:** its GB10 build was a
-`-variant` tag (the `-turbo` tag was datacenter-only with no GB10 profile) — so if a
-model won't show a runnable GB10 profile, check for a `-variant`-style tag.
+and record it in a model preset. A `-variant` suffix often identifies a specialized
+container, but the suffix alone does not prove GB10 compatibility—confirm with the
+official matrix and `list-model-profiles`.

@@ -1,177 +1,95 @@
-# Model swap cheat-sheet (DGX Spark)
+# NIM model selection on DGX Spark
 
-The bot speaks the OpenAI API, so swapping models never touches `bot.py` — you only
-edit `.env` (and, for a non-NIM backend, the compose service). Each NIM model is
-cached in the `nim-cache` volume, so once built you can flip between them quickly.
+Research checked against NVIDIA's NGC catalog and NIM support matrices on
+**2026-08-23**. Treat compatibility as a property of the complete
+**image tag + model profile + GPU** combination, not just the model name.
 
-Speed note: the Spark is **memory-bandwidth bound** (273 GB/s). Dense models slow
-down roughly in proportion to their size; MoE models (only a few B params active per
-token) stay fast even when "large." Rough real-world chat speeds below.
+## Recommended single-Spark choices
 
-**GB10/Spark essentials (apply to every NIM model here):** force eager mode
-(`NIM_DISABLE_CUDA_GRAPH=1`) to dodge the sm_121 torch.compile crash; keep
-`NIM_KVCACHE_PERCENT` modest (unified memory = system RAM); and enable tool calling
-via `NIM_PASSTHROUGH_ARGS` with the model's parser. These are pre-set in
-`docker-compose.yml` for the Nano default — adjust per model.
+| Model | Why choose it | Verified Spark status | Caveats |
+|---|---|---|---|
+| Nemotron 3 Nano 30B-A3B | Current balanced default; fast MoE, reasoning and tools | Current NIM support matrix lists GB10 with BF16, FP8 and NVFP4 profiles | Model-specific reasoning controls |
+| Nemotron 3.5 Lightning 30B-A3B | Best candidate for the next default; 3B active parameters, reasoning, agents, coding, 1M model context | Current matrix verifies GB10 and lists a 30 GB TP1 NVFP4 floor | Early-access container as of this review; benchmark before promoting |
+| GPT-OSS 20B | Strong compact reasoning and tool-use option | Current matrix explicitly verifies GB10 with TP1 MXFP4 | `/think` needs a `reasoning_effort` adapter |
+| Qwen3 32B for DGX Spark | Multilingual, reasoning and agent use; dedicated NVFP4 build | Spark-only NIM profile, one GB10, about 41.6 GB disk footprint | Legacy 1.x variant; `/think` needs Qwen controls |
+| Nemotron Nano 9B v2 for DGX Spark | Low memory use and NVIDIA reasoning/tool support | Dedicated one-Spark container | Lower quality ceiling than the 30B MoE choices |
+| Llama 3.1 8B Instruct for DGX Spark | Fast, simple, predictable chat/summarization baseline | Dedicated one-Spark FP8 container | No native reasoning mode; older model |
 
----
+The corresponding ready-to-layer files live in [`model-presets/`](./model-presets/).
 
-## Option N — Nemotron 3 Nano 30B-A3B (DEFAULT) — reasoning + tools, right-sized
-The current default. MoE: 30B total / **~3.5B active**, so it's fast; **nvfp4 weights
-are only ~21 GB**, leaving huge headroom alongside Open WebUI + SearXNG. Same Nemotron
-3 generation as the Super, so it does **reasoning + tool calling together**.
-```dotenv
-NIM_IMAGE=nvcr.io/nim/nvidia/nemotron-3-nano:latest
-MODEL_NAME=nvidia/nemotron-3-nano        # NIM serves it as plain "nemotron-3-nano"
-NIM_MODEL_PROFILE=1fba9ecfcfb4cde28d4ce3fd55c40bca89a5a613e25e98f057befe6a7e99eada  # nvfp4-tp1
-NIM_PASSTHROUGH_ARGS=--enable-auto-tool-choice --tool-call-parser qwen3_coder
-REASONING_STYLE=nemotron3
-```
-Verify the profile id with `docker compose run --rm nim list-model-profiles` after any
-tag bump. This is the combo that runs cleanly on the Spark today.
+## Switching models
 
-## Option A — Nemotron Super 49B (dense)
-Best dense quality that's still responsive. ~6–10 tok/s. **Note:** tool calling
-requires reasoning OFF (`detailed thinking off`) — it can't do both at once, and it
-uses `REASONING_STYLE=directive`.
-```dotenv
-NIM_IMAGE=nvcr.io/nim/nvidia/llama-3.3-nemotron-super-49b-v1.5:latest
-MODEL_NAME=nvidia/llama-3.3-nemotron-super-49b-v1.5
-REASONING_STYLE=directive
-```
+Keep secrets and personal settings in `.env`. Layer the selected model preset last:
 
-## Option C — Nemotron 3 Super 120B-A12B (MoE) — bigger, but tight on the Spark
-> ⚠️ **Caution:** this fits in memory (~60 GB nvfp4) but **OOM'd in practice** on the
-> Spark once Open WebUI + SearXNG + bot were also running, even with KV caps. Workable
-> if you run NIM mostly alone; otherwise prefer the Nano (Option N). Higher quality and
-> still MoE-fast, but the memory margin is thin.
-
-The newer Nemotron *3* generation, a strong pick for an **agentic** chatbot:
-its NIM runs a reasoning-parser and a tool-call-parser simultaneously, so — unlike
-Option A — it can **reason and call tools in the same turn** (e.g. agentic web
-search in Open WebUI). MoE: 120B total but only **~12B active/token**, so it decodes
-about as fast as a ~12B model despite the size. Pre-trained in **NVFP4**, loads at
-~87 GB — fits the Spark's 128 GB (NVIDIA rates Spark for up to ~200B). Needs
-`shm_size: 16gb` (Mamba-2 state cache) — already set on the `nim` service.
-
-```dotenv
-# Use the "-variant" tag — it's the GB10/Spark build. (The "-turbo" tag is
-# datacenter H200/B200 only and ships NO GB10 profile — it will fail on the Spark
-# with "0 compatible profiles".)
-NIM_IMAGE=nvcr.io/nim/nvidia/nemotron-3-super-120b-a12b:1.8.0-variant
-MODEL_NAME=nvidia/nemotron-3-super-120b-a12b
-```
 ```bash
-# Verify a GB10-runnable profile exists BEFORE a long pull:
-docker compose run --rm nim list-model-profiles   # want GB10 (2e12:10de) under "runnable"
-docker compose up -d nim                           # first boot builds engines (several min)
-docker compose exec nim curl -s localhost:8000/v1/models   # confirm the served id
+./compose-model model-presets/qwen3-32b-spark.env up -d nim bot
 ```
-- ⚠️ **Force the nvfp4 profile.** On GB10 the image lists fp8 (~120GB) and bf16
-  (~240GB) as "runnable" (NIM can't gauge unified memory), so auto-select may load
-  one and OOM. Pin the ~60GB nvfp4 single-GPU profile in `.env`:
-  ```dotenv
-  NIM_MODEL_PROFILE=66f2cc1e52c372defe1bcf7eed8086a4c16022cefbddf2217f136f6bbcc47644
-  ```
-  (Re-verify the id with `docker compose run --rm nim list-model-profiles` after any
-  image-tag bump.) If it still OOMs, add `NIM_KVCACHE_PERCENT=0.6` to the nim env.
-- ⚠️ This tag has had reports of HTTP **400/403** downloading the `rl-030326-nvfp4`
-  artifact — an NGC **entitlement/org** issue (use the org-scoped key + accept terms).
-  If it won't download, use the **Ollama** fallback below (`ollama pull nemotron-3-super`).
-- Confirm the current tag on the [NGC page](https://catalog.ngc.nvidia.com/orgs/nim/teams/nvidia/containers/nemotron-3-super-120b-a12b)
-  and see NVIDIA's [Spark Deployment Guide](https://docs.nvidia.com/nemotron/nightly/usage-cookbook/Nemotron-3-Super/SparkDeploymentGuide/README.html).
-- It loads ~87 GB, leaving ~40 GB of unified memory shared with the OS + the
-  `open-webui`/`searxng`/`bot` containers + KV cache. Fits, but tighter than the 49B
-  (~25 GB) — watch memory if you run long contexts alongside the web UI.
-- For agentic use, no reasoning/tool tradeoff: set Open WebUI's Function Calling to
-  **Native** and just use it. (Same toggle as Option A, but here reasoning can stay on.)
 
-## Option B — gpt-oss-120B (MoE, ~5B active) — the smart "go big" pick
-120B total but only ~5B active per token, so it stays fast on the Spark despite the
-size. ~65 GB weights (MXFP4). Great general chat/reasoning. Like Option C, it also
-does **reasoning + tool calling together** (adjustable reasoning effort), so it's a
-fine agentic pick too — uses OpenAI's "harmony" format (NIM handles it).
+Before a large pull, inspect the resolved image:
 
-### B1: via NIM (max performance, matches current setup)
-```dotenv
-NIM_IMAGE=nvcr.io/nim/openai/gpt-oss-120b:latest
-MODEL_NAME=openai/gpt-oss-120b
-```
 ```bash
-docker compose up -d nim     # first boot builds engines (several min)
-docker compose exec nim curl -s localhost:8000/v1/models   # confirm the served id
+./compose-model model-presets/qwen3-32b-spark.env config --images
 ```
-⚠️ The `nim/openai/gpt-oss-120b` image has had reports of `402 PAYMENT_REQUIRED` on
-model download for some NGC accounts (entitlement-gated). If you hit that, either
-request access on NGC or use the Ollama route (B2), which pulls from Ollama's library.
 
-### B2: via Ollama (no NGC entitlement needed)
-gpt-oss handling differs slightly between backends; Ollama is the no-friction path.
-Replace the `nim` service in `docker-compose.yml` with:
-```yaml
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    restart: always
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    volumes:
-      - ollama:/root/.ollama
-    expose:
-      - "11434"
-    healthcheck:
-      test: ["CMD", "ollama", "ps"]
-      interval: 20s
-      timeout: 5s
-      retries: 30
-      start_period: 120s
-```
-Add `ollama:` under the top-level `volumes:` key, point `depends_on` at `ollama`,
-and set in `.env`:
-```dotenv
-OPENAI_BASE_URL=http://ollama:11434/v1
-MODEL_NAME=gpt-oss:120b
-```
-Then pull the model once:
+Then verify both hardware compatibility and the served API ID:
+
 ```bash
-docker compose up -d ollama
-docker compose exec ollama ollama pull gpt-oss:120b
-docker compose up -d bot
+./compose-model model-presets/qwen3-32b-spark.env run --rm nim list-model-profiles
+docker compose exec nim curl -s localhost:8000/v1/models
 ```
 
----
+If `/v1/models` advertises a different ID, update `MODEL_NAME` in that preset. Never
+reuse `NIM_MODEL_PROFILE` or a tool-call parser across models without verifying it;
+both are image/model-specific.
 
-## Other good options (drop-in `.env` blocks)
+## Generic model support: two levels
 
-| Model | Type | NIM image / Ollama tag | `MODEL_NAME` | ~Speed |
-|---|---|---|---|---|
-| Llama 3.3 70B | dense | `nvcr.io/nim/meta/llama-3.3-70b-instruct:latest` | `meta/llama-3.3-70b-instruct` | ~3–5 tok/s |
-| Qwen3 32B | dense | Ollama: `qwen3:32b` | `qwen3:32b` | ~8–12 tok/s |
-| Gemma 3 27B | dense | Ollama: `gemma3:27b` | `gemma3:27b` | ~10–14 tok/s |
-| Nemotron Super 49B | dense | (Option A above) | — | ~6–10 tok/s |
-| gpt-oss-120B | MoE | (Option B above) | — | fast (MoE) |
+1. **Optimized model-specific NIMs (recommended):** swap `NIM_IMAGE`, `MODEL_NAME`,
+   reasoning style, and sampling through a preset. These containers give the most
+   predictable performance and are curated by NVIDIA.
+2. **Model-Free NIM (future extension):** use `nvidia/model-free-nim` with
+   `NIM_MODEL_NAME` pointing to an NGC, Hugging Face, or local model. NVIDIA now
+   verifies the container itself on GB10, but each selected model must still fit and
+   be supported by its bundled backend. External model code and weights require a
+   separate supply-chain review.
 
-Speeds are rough single-stream estimates; reasoning mode and long context lower them.
+The current Compose file exposes `NIM_MODEL_NAME`, `NIM_SERVED_MODEL_NAME`, and
+`HF_TOKEN` so a model-free preset can be added later. It intentionally does not ship
+one yet: picking a default third-party model and trust policy is a separate decision.
 
----
+## Models not recommended for this one-Spark stack
 
-## Per-model reasoning quirks (the one model-specific bit in `bot.py`)
-The bridge sends Nemotron's `detailed thinking on/off` directive and strips
-`<think>…</think>`. This is harmless on other models (unknown directive ignored;
-regex only fires if `<think>` appears). But each family controls reasoning differently:
+- **Nemotron 3 Super 120B-A12B:** the repo's earlier experiment loaded only under a
+  narrow NVFP4 configuration and then ran out of unified-memory headroom alongside
+  the UI/search containers. The current NIM 2.x support matrix does not list GB10 as
+  a verified GPU for this model. Treat it as experimental, not plug-and-play.
+- **GPT-OSS 120B:** the current NIM 2.x matrix does not list GB10 among its verified
+  GPUs. Prefer GPT-OSS 20B here.
+- **MiniMax M2.5 and DeepSeek V4 Flash:** NVIDIA's Spark deployment guide requires
+  two DGX Spark systems for these large profiles.
+- Generic 70B dense models may fit at low precision, but fitting in 128 GB unified
+  memory does not establish an optimized or supported one-Spark NIM profile.
 
-- **Nemotron** — system directive `detailed thinking on/off` (already handled).
-- **gpt-oss** — exposes a `reasoning_effort` param (`low`/`medium`/`high`); emits a
-  separate reasoning channel rather than `<think>` tags. The `/think` toggle is a
-  no-op for it, but normal chat works fine out of the box.
-- **Qwen3** — `/think` and `/no_think` tokens in the prompt; uses `<think>` tags
-  (so the existing stripping already cleans them up).
+## Operational rules
 
-If you settle on a non-Nemotron model long-term, adjust the small reasoning block in
-`bot.py` (`THINK_DIRECTIVE` / `_THINK_RE`, ~lines 38–42). Everything else is
-model-agnostic.
+- Pin exact image tags in presets; do not make `latest` part of a reproducible setup.
+- Run `list-model-profiles` after every tag change. Profile hashes are not stable API.
+- Keep engine flags and reasoning/tool parsers in presets. For example, NVIDIA's
+  Nemotron 3.5 guide requires `--reasoning-parser nemotron_v3`, while the Qwen3 Spark
+  variant does not support the eager-mode environment variable.
+- Start NIM alone after a model change and watch system RAM/swap before adding UI
+  services.
+- Keep `NIM_KVCACHE_PERCENT` conservative on unified memory and lower
+  `NIM_MAX_MODEL_LEN` when startup or concurrency needs more headroom.
+- The model's advertised maximum context is not a safe default allocation.
+
+## Official sources
+
+- [Current NIM LLM support matrix](https://docs.nvidia.com/nim/large-language-models/latest/reference/support-matrix.html)
+- [NIM 1.15 model-specific catalog and legacy Spark variants](https://docs.nvidia.com/nim/large-language-models/1.15.0/models.html)
+- [DGX Spark collection in NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/-/collections/dgx-spark/-/)
+- [NIM model-specific versus multi/model-free overview](https://docs.nvidia.com/nim/large-language-models/1.15.0/introduction.html)
+- [NIM configuration reference](https://docs.nvidia.com/nim/large-language-models/1.15.0/configuration.html)
+- [Nemotron 3.5 Lightning NIM launch settings](https://docs.nvidia.com/nim/large-language-models/2.0.10/get-started/advanced/get-started-nemotron-3.5-lightning.html)
+- [Legacy Spark variant behavior and limitations](https://docs.nvidia.com/nim/large-language-models/1.15.0/nim-container-variants.html)
+- [Two-node DGX Spark deployment guide](https://docs.nvidia.com/nim/large-language-models/1.15.0/deploy-on-dgx-spark.html)

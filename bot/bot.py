@@ -1,5 +1,5 @@
 """
-Telegram <-> NVIDIA NIM bridge (default: Nemotron 3 Super 120B-A12B).
+Telegram <-> OpenAI-compatible local LLM bridge (default: Nemotron 3 Nano).
 
 - Talks to Telegram via long-polling (outbound only; no inbound ports).
 - Talks to NIM via its OpenAI-compatible API.

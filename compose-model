@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -lt 2 ]]; then
+  echo "Usage: $0 model-presets/<name>.env <docker compose arguments...>" >&2
+  exit 2
+fi
+
+preset=$1
+shift
+
+case "$preset" in
+  model-presets/*.env) ;;
+  *)
+    echo "Preset must be a file under model-presets/: $preset" >&2
+    exit 2
+    ;;
+esac
+
+if [[ ! -f .env ]]; then
+  echo "Missing .env; copy .env.example and add credentials first." >&2
+  exit 2
+fi
+
+if [[ ! -f "$preset" ]]; then
+  echo "Preset not found: $preset" >&2
+  exit 2
+fi
+
+exec docker compose --env-file .env --env-file "$preset" "$@"

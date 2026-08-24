@@ -1,23 +1,24 @@
 services:
   # ---------------------------------------------------------------------------
-  # NVIDIA NIM — serves Nemotron 3 Super 120B-A12B (MoE) with TensorRT-LLM (NVFP4
-  # on GB10). Exposes an OpenAI-compatible API on :8000. Stays on the internal
-  # network; the bot and Open WebUI talk to it.
+  # NVIDIA NIM — serves the model selected by NIM_IMAGE. Model-specific values
+  # belong in a preset under model-presets/; see models.md. The API stays on the
+  # internal network and is shared by the bot and optional Open WebUI.
   # ---------------------------------------------------------------------------
   nim:
-    # Nemotron 3 Nano 30B-A3B (MoE, ~3.5B active) — sized for the Spark.
-    # VERIFY THE TAG: on the Spark, list tags and pick the GB10 build (look for a
-    # "-variant" tag like the 120B had); confirm with `list-model-profiles`. Set the
-    # working value in .env as NIM_IMAGE. See INSTALL.md §10 / models.md.
-    image: ${NIM_IMAGE:-nvcr.io/nim/nvidia/nemotron-3-nano:latest}
+    image: ${NIM_IMAGE:-nvcr.io/nim/nvidia/nemotron-3-nano:2.0.8}
     container_name: nemotron-nim
     restart: always
     environment:
       - NGC_API_KEY=${NGC_API_KEY}
-      # Pinned to the Nano's nvfp4-tp1-pp1 profile (~21 GB, most efficient on GB10).
-      # The fp8 profile (~34 GB) also fits; both are fine on 128 GB. Re-verify the id
-      # after a tag bump with: docker compose run --rm nim list-model-profiles
-      - NIM_MODEL_PROFILE=${NIM_MODEL_PROFILE:-1fba9ecfcfb4cde28d4ce3fd55c40bca89a5a613e25e98f057befe6a7e99eada}
+      # Optional model-specific settings. A key without a value is omitted when it
+      # is not present in the Compose environment, avoiding stale profile hashes or
+      # parsers leaking from one model into another.
+      - NIM_MODEL_PROFILE
+      - NIM_PASSTHROUGH_ARGS
+      - NIM_SERVED_MODEL_NAME
+      - NIM_MODEL_NAME
+      - HF_TOKEN
+      - NIM_DISABLE_CUDA_GRAPH
       # Context window cap (KV-cache memory). Model supports up to 1M, but on the
       # Spark a too-large value can prevent startup (KV cache won't fit) and starves
       # concurrency. 128K is a comfortable chatbot default; see INSTALL.md §10.
@@ -27,18 +28,6 @@ services:
       # ~115GB for KV ON TOP OF ~60GB weights → overcommit → swap thrash. Keep this
       # low so the OS + other containers fit. See INSTALL.md §10.
       - NIM_KVCACHE_PERCENT=${NIM_KVCACHE_PERCENT:-0.4}
-      # Force eager mode on GB10/sm_121: vLLM's torch.compile/Inductor warmup crashes
-      # ("InductorError") because the build's CUDA arch list doesn't cover sm_121.
-      # NIM_DISABLE_CUDA_GRAPH maps to vLLM's --enforce-eager (skips compilation +
-      # CUDA graphs — a bit slower, but lets the engine start). See INSTALL.md §10.
-      # NOTE: the var is NIM_DISABLE_CUDA_GRAPH, NOT NIM_ENFORCE_EAGER (which is ignored).
-      - NIM_DISABLE_CUDA_GRAPH=${NIM_DISABLE_CUDA_GRAPH:-1}
-      # Enable tool/function calling. This Nano NIM does NOT auto-configure it (the
-      # 120B did), so agentic mode fails with: '"auto" tool choice requires
-      # --enable-auto-tool-choice and --tool-call-parser to be set'. Pass them via
-      # NIM_PASSTHROUGH_ARGS (the escape hatch for any vLLM arg without a NIM var).
-      # Nemotron 3 Nano's tool-call parser is "qwen3_coder".
-      - NIM_PASSTHROUGH_ARGS=${NIM_PASSTHROUGH_ARGS:---enable-auto-tool-choice --tool-call-parser qwen3_coder}
     # NIM caches downloaded/optimized engines here so restarts are fast.
     volumes:
       - nim-cache:/opt/nim/.cache
@@ -58,7 +47,7 @@ services:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/v1/health/ready"]
       interval: 20s
       timeout: 5s
-      retries: 60        # first boot builds engines — can take several minutes
+      retries: 60        # first boot preparation can take several minutes
       start_period: 600s
 
   # ---------------------------------------------------------------------------
@@ -74,8 +63,8 @@ services:
         condition: service_healthy
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - OPENAI_BASE_URL=http://nim:8000/v1
-      - OPENAI_API_KEY=not-needed-for-local-nim
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-http://nim:8000/v1}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-not-needed-for-local-nim}
       - MODEL_NAME=${MODEL_NAME:-nvidia/nemotron-3-nano}
       - SYSTEM_PROMPT=${SYSTEM_PROMPT:-You are a helpful, concise assistant.}
       - MAX_HISTORY_TURNS=${MAX_HISTORY_TURNS:-12}
@@ -83,8 +72,10 @@ services:
       # Reasoning convention: "nemotron3" (chat_template_kwargs) | "directive"
       # (49B "detailed thinking on/off") | "none".
       - REASONING_STYLE=${REASONING_STYLE:-nemotron3}
+      - REASONING_BUDGET=${REASONING_BUDGET:-}
       - TEMPERATURE=${TEMPERATURE:-1.0}
       - TOP_P=${TOP_P:-0.95}
+      - MAX_TOKENS=${MAX_TOKENS:-2048}
       - DB_PATH=/data/conversations.db
     volumes:
       - bot-data:/data
@@ -95,6 +86,7 @@ services:
   # Reaches NIM over the internal network; published on the host at :3000.
   # ---------------------------------------------------------------------------
   open-webui:
+    profiles: ["web"]
     image: ghcr.io/open-webui/open-webui:main
     container_name: open-webui
     restart: always
@@ -124,6 +116,7 @@ services:
   # Config lives in ./searxng/settings.yml (must enable the JSON format).
   # ---------------------------------------------------------------------------
   searxng:
+    profiles: ["web"]
     image: searxng/searxng:latest
     container_name: searxng
     restart: always
