@@ -183,7 +183,8 @@ the Spark stays firewalled while remaining reachable from anywhere via Telegram.
 The stack includes two optional services that hang off the same NIM model:
 
 - **Open WebUI** — a local ChatGPT-style web UI. Streams tokens live and shows
-  per-response generation stats (tokens/sec). Published on the host at port **3000**.
+  per-response generation stats (tokens/sec). The image is pinned to **v0.11.0**
+  for reproducible upgrades and is published on the host at port **3000**.
 - **SearXNG** — a self-hosted metasearch engine that gives Open WebUI **web-search
   RAG**, so the model can answer about events after its training cutoff. Fully local,
   no API key. Internal-only (Open WebUI reaches it by container name).
@@ -226,6 +227,22 @@ from them.
 docker compose exec open-webui curl -s "http://searxng:8080/search?q=test&format=json" | head -c 300
 ```
 JSON output = working.
+
+### Upgrade Open WebUI safely
+
+Open WebUI releases can migrate the database stored in `/app/backend/data`. Stop
+the service and take a filesystem backup before changing its pinned image tag:
+
+```bash
+mkdir -p backups/openwebui-data-pre-upgrade
+docker compose stop open-webui
+docker cp open-webui:/app/backend/data/. backups/openwebui-data-pre-upgrade/
+./compose-model model-presets/nemotron-3-nano.env --profile web pull open-webui
+./compose-model model-presets/nemotron-3-nano.env --profile web up -d open-webui
+```
+
+Use the currently selected model preset and the same Compose project name for all
+commands when upgrading an existing deployment.
 
 ---
 
