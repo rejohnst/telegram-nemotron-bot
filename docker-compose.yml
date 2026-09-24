@@ -5,6 +5,8 @@ services:
   # internal network and is shared by the bot and optional Open WebUI.
   # ---------------------------------------------------------------------------
   nim:
+    ports:
+      - "127.0.0.1:8000:8000"
     image: ${NIM_IMAGE:-nvcr.io/nim/nvidia/nemotron-3-nano:2.0.8}
     container_name: nemotron-nim
     restart: always
@@ -107,7 +109,7 @@ services:
       - WEB_SEARCH_ENGINE=searxng
       - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>
       - WEB_SEARCH_RESULT_COUNT=3
-      - WEB_SEARCH_CONCURRENT_REQUESTS=10
+      - WEB_SEARCH_CONCURRENT_REQUESTS=2
     volumes:
       - openwebui-data:/app/backend/data
 
