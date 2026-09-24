@@ -1,8 +1,8 @@
 services:
   # ---------------------------------------------------------------------------
   # NVIDIA NIM — serves the model selected by NIM_IMAGE. Model-specific values
-  # belong in a preset under model-presets/; see models.md. The API stays on the
-  # internal network and is shared by the bot and optional Open WebUI.
+  # belong in a preset under model-presets/; see models.md. The API is shared on
+  # the internal network and published only on host loopback for local clients.
   # ---------------------------------------------------------------------------
   nim:
     image: ${NIM_IMAGE:-nvcr.io/nim/nvidia/nemotron-3-nano:2.0.8}
@@ -39,7 +39,10 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    # Only exposed to the internal compose network (no host port published).
+    # Docker services use nim:8000. Host-local clients such as Hermes Agent use
+    # 127.0.0.1:8000; the loopback bind prevents access from the LAN.
+    ports:
+      - "127.0.0.1:8000:8000"
     expose:
       - "8000"
     healthcheck:

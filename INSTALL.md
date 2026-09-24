@@ -172,9 +172,12 @@ volume, so subsequent boots are fast.
 
 ## 8. Networking notes
 
-No inbound ports, reverse proxy, VPN, or HTTPS are required. The bot connects
-*outbound* to Telegram (long-polling) and to NIM on the internal Docker network, so
-the Spark stays firewalled while remaining reachable from anywhere via Telegram.
+No LAN-facing inference port, reverse proxy, VPN, or HTTPS is required. The bot
+connects *outbound* to Telegram (long-polling) and to NIM on the internal Docker
+network. NIM is additionally published on Spark host loopback at
+`127.0.0.1:8000` for local clients such as Hermes Agent; that address is not
+reachable from the LAN. See [`HERMES.md`](./HERMES.md) for the optional Hermes
+integration.
 
 ---
 

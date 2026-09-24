@@ -6,12 +6,14 @@ versioned presets also cover other NVIDIA-verified single-Spark models. See
 [`models.md`](./models.md) for the researched shortlist and switching workflow.
 
 ## Why this design
-- **No inbound networking.** The bot connects *outbound* to Telegram (long-polling)
-  and to NIM on the internal Docker network. No port-forwarding, reverse proxy,
-  HTTPS, or VPN needed — your Spark stays firewalled. Telegram is the public front door.
-- **Local inference.** NIM exposes an OpenAI-compatible API only on the internal
-  Compose network. Telegram messages still pass through Telegram's service, but
-  prompts are not sent to a hosted model provider.
+- **No LAN-facing inference port.** The bot connects *outbound* to Telegram
+  (long-polling) and to NIM on the internal Docker network. NIM is also bound to
+  host loopback (`127.0.0.1:8000`) for local clients such as Hermes Agent, but is
+  not reachable from the LAN. No port-forwarding, reverse proxy, HTTPS, or VPN is
+  needed — Telegram is the public front door.
+- **Local inference.** NIM exposes an OpenAI-compatible API on the internal
+  Compose network and Spark host loopback. Telegram messages still pass through
+  Telegram's service, but prompts are not sent to a hosted model provider.
 - **Persistent memory.** Conversation history is stored in SQLite (a Docker volume),
   so context survives restarts and reboots.
 - **Always-on.** Both services use `restart: always`.
@@ -22,6 +24,9 @@ Telegram servers ──outbound──► bot (python-telegram-bot)
                                  │  OpenAI-compatible API (internal net)
                                  ▼
                                NIM ── selected model preset (GB10)
+                                ▲
+                                │  OpenAI-compatible API (127.0.0.1 only)
+                         Hermes Agent (optional)
 ```
 
 ## Prerequisites (on the DGX Spark)
@@ -67,9 +72,9 @@ Then message your bot on Telegram. 🎉
 
 ## Notes & gotchas
 - `MODEL_NAME` must exactly match the model id the NIM advertises. If replies fail
-  with a model-not-found error, check `curl http://localhost:8000/v1/models` from
-  inside the nim container (`docker compose exec nim curl -s localhost:8000/v1/models`)
-  and copy the `id` into the selected model preset.
+  with a model-not-found error, run
+  `curl -s http://127.0.0.1:8000/v1/models` on the Spark and copy the `id` into
+  the selected model preset.
 - Image tags, profile hashes, served IDs, and tool parsers are model-specific. Verify
   them with `list-model-profiles` and `/v1/models` after any image-tag change.
 - Switching models also means setting `REASONING_STYLE` to match the model's
@@ -85,6 +90,12 @@ Then message your bot on Telegram. 🎉
 The staged plan for streaming, safe splitting, attachments, tools/search, per-chat
 controls, observability, and resilient error handling is in
 [`BOT_ROADMAP.md`](./BOT_ROADMAP.md).
+
+## Optional Hermes Agent integration
+
+Hermes Agent can use the same local NIM for inference and expose its agentic tool
+workflow through a separate Telegram bot. See [`HERMES.md`](./HERMES.md) for the
+tested Nemotron 3.5 Lightning setup, validation, security, and reboot notes.
 
 ## Manage
 ```bash
