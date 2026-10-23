@@ -1,5 +1,10 @@
 # Model presets
 
+Bolt uses a separate vLLM runtime selected automatically by the wrapper:
+`./compose-model model-presets/nemotron-3.5-bolt.env ...`. Read
+[`BOLT.md`](../BOLT.md) for deployment, validation, and rollback. It requires
+Compose 2.24.4+ and a local image build; it is not a NIM model/profile swap.
+
 Each file contains only model-specific settings. Keep credentials and personal bot
 settings in the root `.env`, then layer one preset after it:
 
@@ -15,7 +20,7 @@ the API model ID after startup:
 docker compose exec nim curl -s localhost:8000/v1/models
 ```
 
-Tags and served model IDs can change between NIM releases. Update a preset only
+For NIM presets, tags and served model IDs can change between NIM releases. Update a preset only
 after `list-model-profiles` reports a runnable one-GPU GB10 profile and `/v1/models`
 confirms the ID.
 

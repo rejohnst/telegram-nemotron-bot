@@ -27,4 +27,20 @@ if [[ ! -f "$preset" ]]; then
   exit 2
 fi
 
-exec docker compose --env-file .env --env-file "$preset" "$@"
+# Read only this literal selector from the preset; never execute an env file as
+# shell code. In particular, a previous backend in .env must not affect NIMs.
+backend=$(sed -n 's/^INFERENCE_BACKEND=//p' "$preset")
+case "$backend" in
+  ""|nim)
+    exec docker compose --env-file .env --env-file "$preset" \
+      -f docker-compose.yml "$@"
+    ;;
+  vllm-bolt)
+    exec docker compose --env-file .env --env-file "$preset" \
+      -f docker-compose.yml -f docker-compose.bolt.yml "$@"
+    ;;
+  *)
+    echo "Unsupported INFERENCE_BACKEND in $preset: $backend" >&2
+    exit 2
+    ;;
+esac
