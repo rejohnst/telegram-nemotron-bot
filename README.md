@@ -5,6 +5,10 @@ DGX Spark by **NVIDIA NIM**. The default is **Nemotron 3 Nano 30B-A3B**, while
 versioned presets also cover other NVIDIA-verified single-Spark models. See
 [`models.md`](./models.md) for the researched shortlist and switching workflow.
 
+**Nemotron 3.5 Bolt 74B-A9B 24GB:** an experimental vLLM-backed preset is also
+available. It uses the same client endpoints; see [`BOLT.md`](./BOLT.md) for the
+required build, Spark validation, and rollback instructions.
+
 ## Why this design
 - **No LAN-facing inference port.** The bot connects *outbound* to Telegram
   (long-polling) and to NIM on the internal Docker network. NIM is also bound to

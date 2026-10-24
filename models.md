@@ -6,6 +6,12 @@ Research checked against NVIDIA's NGC catalog and NIM support matrices on
 
 ## Recommended single-Spark choices
 
+**2026-10-23 addition:** Nemotron 3.5 Bolt 74B-A9B 24GB uses a separate vLLM
+backend rather than a verified NIM image. See [`BOLT.md`](./BOLT.md) and
+`model-presets/nemotron-3.5-bolt.env`. Its image includes ARM64; inference and
+kernel compatibility still require validation on the target Spark. The NIM
+profile inspection commands below do not apply to Bolt.
+
 | Model | Why choose it | Verified Spark status | Caveats |
 |---|---|---|---|
 | Nemotron 3 Nano 30B-A3B | Current balanced default; fast MoE, reasoning and tools | NIM 2.0.8 reported runnable TP1 BF16, FP8, and NVFP4 profiles on the target GB10; the preset pins the 21 GB NVFP4 profile | Profile hash is tied to the pinned image tag |
